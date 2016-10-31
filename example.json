@@ -1,0 +1,26 @@
+{"n":"/",
+"t":"d",
+"c":[{"n":"child_dir",
+	 "t":"d",
+	 "c":[{"n":"child_file.json",
+		   "t":"literal",
+		   "d":["some JSONable stuff", 123, {"key":"value"}],
+		   "m":{"st_size":1024}}
+		 ],
+	 "m":{}},
+	{"n":"child_stream.zip",
+	 "t":"uri",
+	 "s":"http://ipv4.download.thinkbroadband.com/5MB.zip",
+	 "m":{}},
+	{"n":"child_file.txt",
+	 "t":"file",
+	 "f":"/Users/justin.payne/CLCLicenseInfo.txt",
+	 "m":{}},
+	{"n":"child_process.fastq",
+	 "t":"process",
+	 "f":"/tmp/fa",
+	 "p":"echo 'some text'",
+	 "m":{}}
+   ],
+"m":{}
+}
