@@ -12,6 +12,10 @@ from subprocess import Popen
 from collections import OrderedDict
 from time import time
 
+DIRECTORY = 0o040000
+FILE	  = 0o100000
+RWXR_XR_X = 0o000755
+
 # example = {'n':'/',  					#name
 # 		   't':'d', 					#type
 # 		   'c':[{'n':'child_dir',		#children
@@ -371,7 +375,7 @@ if __name__ == '__main__':
 # 		print('\n'.join(fs.__traverse__()))
 # 		print(fs)
 # 		print(fs.__resolve__('/'))
-		print(fs.__resolve__('/child_process.fastq'))
+#		print(fs.__resolve__('/child_process.fastq'))
 # 		print(fs.__resolve__('/child_dir/'))
 # 		print(fs.__resolve__('/child_dir/child_file.txt'))
 # 		print(fs.__resolve__('/doesnt_exist'))
