@@ -11,7 +11,7 @@
 	{"n":"child_stream.zip",
 	 "t":"uri",
 	 "s":"http://ipv4.download.thinkbroadband.com/5MB.zip",
-	 "m":{}},
+	 "m":{"st_size":5000000}},
 	{"n":"child_file.txt",
 	 "t":"file",
 	 "f":"/Users/justin.payne/CLCLicenseInfo.txt",
@@ -20,7 +20,12 @@
 	 "t":"process",
 	 "f":"/tmp/fa",
 	 "p":"echo 'some text'",
-	 "m":{}}
+	 "m":{}},
+	 {"n":"SRR390728.fastq",
+	  "t":"process",
+	  "f":"/tmp/fg",
+	  "p":"fastq-dump SRR390728 --split-spot -Z",
+	  "m":{"st_size":0}}
    ],
 "m":{}
 }

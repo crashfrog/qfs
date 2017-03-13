@@ -4,16 +4,19 @@ import stat
 import errno
 import requests
 import logging
-from io import BytesIO
-from os import environ, mkfifo, sep, unlink
-from os.path import join as j, relpath as r, split
+from io import BytesIO, BufferedReader
+from os import environ, mkfifo, sep, unlink, listdir
+from os.path import join as j, relpath as r, split, expanduser, getsize, isfile
 from fuse import FUSE, FuseOSError, Operations, LoggingMixIn
 from subprocess import Popen
 from collections import OrderedDict
-from time import time
+from time import time, ctime
+from functools import partial
 
 DIRECTORY = 0o040000
 FILE	  = 0o100000
+FIFO	  = 0o010000
+CHAR	  = 0o020000
 RWXR_XR_X = 0o000755
 
 # example = {'n':'/',  					#name
@@ -40,17 +43,19 @@ RWXR_XR_X = 0o000755
 # 			}
 
 def get(struct, mount_point=None):
-	return types[struct['t']](mp=mount_point, **struct)
+	fs = types[struct['t']](mp=mount_point, **struct)
+	return fs
 
 class Dir(LoggingMixIn, Operations):
 	"Basic container"
 	
-	st_mode = (0o040000  #directory
-			 | 0o000755 ) #rwxr-xr-x
+	st_mode = (DIRECTORY  #directory
+			 | RWXR_XR_X ) #rwxr-xr-x
 	
-	def __init__(self, n, mp=None, m={}, c=[], **k):
+	def __init__(self, n=None, mp=None, m={}, c=[], **k):
 		self.mp = mp
-		self.name = n
+		if n:
+			self.name = n
 		self.childs = OrderedDict()
 		self.metadata = m
 		for r in c:
@@ -58,7 +63,7 @@ class Dir(LoggingMixIn, Operations):
 			self.childs[s.name] = s
 			
 	def __no_such__(self):
-		raise OSError(errno.ENOENT)
+		raise FuseOSError(errno.ENOENT)
 			
 	def __resolve__(self, path):
 		#print(path)
@@ -69,7 +74,7 @@ class Dir(LoggingMixIn, Operations):
 			return self.childs[p.split(sep)[0]].__resolve__(p)
 		except KeyError as e:
 			#pass
-			raise OSError(errno.ENOENT) from e
+			raise FuseOSError(errno.ENOENT) from e
 			#raise OSError(errno.EPERM) from e
 		
 			
@@ -95,6 +100,8 @@ class Dir(LoggingMixIn, Operations):
 	def __chown__(self, uid, gid):
 		return 0
 		
+	st_size = 1024
+		
 	def __stat__(self, fh):
 		t = time()
 		return dict(dict(st_atime=t,
@@ -102,7 +109,7 @@ class Dir(LoggingMixIn, Operations):
 						 st_gid=1,
 						 st_mode=self.st_mode,
 						 st_nlink=2,
-						 st_size=1024,
+						 st_size=self.st_size,
 						 st_mtime=t),
 					**self.metadata)
 	
@@ -165,10 +172,22 @@ class Dir(LoggingMixIn, Operations):
 	def __close__(self, fh):
 		return 0
 		
-	def __fsync__(fdatasync, fh):
+	def __fsync__(fdatasync, fh, fi):
 		return 0
-	
-	
+		
+	def __getxattr__(self, name):
+		if name in self.metadata:
+			return self.metadata[name]
+		raise FuseOSError(errno.ENODATA) #ENOATTR
+		
+	def __setxattr__(self, name, value):
+		self.metadata[name] = value
+		return 0
+		
+	def __listxattr__(self):
+		return tuple(self.metadata.keys())
+		
+		
 	# Public filesystem methods #
 	
 	def access(self, path, mode):
@@ -182,6 +201,15 @@ class Dir(LoggingMixIn, Operations):
 			
 	def getattr(self, path, fh=None):
 		return self.__resolve__(path).__stat__(fh)
+		
+# 	def getxattr(self, path, name, position=0):
+# 		return self.__resolve__(path).__getxattr__(name)
+# 		
+# 	def setxattr(self, path, name, value, options, position=0):
+# 		return self.__resolve__(path).__setxattr__(name, value)
+# 	
+# 	def listxattr(self, path):
+# 		return self.__resolve__(path).__listxattr__()
 	
 	def readdir(self, path, fh):
 		return self.__resolve__(path).__readdir__(fh)
@@ -199,6 +227,8 @@ class Dir(LoggingMixIn, Operations):
 	def mkdir(self, path, mode):
 		path, name = split(path)
 		return self.__resolve__(path).__mkdir__(name, mode)
+		
+
 		
 	def statfs(self, path):
 		return self.__resolve__(path).__statfs__()
@@ -239,8 +269,8 @@ class Dir(LoggingMixIn, Operations):
 	def release(self, path, fh):
 		return self.__resolve__(path).__close__(fh)
 		
-	def fsync(self, path, fdatasync, fh):
-		return self.__resolve__(path).__fsync__(fdatasync, fh)
+	def fsync(self, path, fdatasync, fi):
+		return self.__resolve__(path).__fsync__(fdatasync, fi)
 	
 
 	
@@ -258,8 +288,8 @@ class WritableDir(Dir):
 class Node(Dir):
 	"filesystem node"
 	
-	st_mode = (0o100000		#file
-			 | 0o000755	)	#rwxr-xr-x
+	st_mode = (FILE				#file
+			 | RWXR_XR_X	)	#rwxr-xr-x
 	
 	def __init__(self, **k):
 		super().__init__(**k)
@@ -274,7 +304,8 @@ class JsonStream(Node):
 		self.data = d
 		
 	def __open__(self, flags):
-		self.buffer = BytesIO(str.encode(json.dumps(self.data)))
+		self.buffer = BytesIO(str.encode(json.dumps(self.data, indent=2)))
+		self.st_size = len(self.buffer.read())
 		return 0
 		
 	def __read__(self, length, offset, fh):
@@ -285,6 +316,127 @@ class JsonStream(Node):
 		self.buffer.close()
 		del self.buffer
 		return 0
+		
+class ReflectiveMonitorStream(JsonStream):
+	"Special 'borg' node to monitor the status of the FS"
+	
+	#Borg pattern by Alex Martinelli
+	#http://code.activestate.com/recipes/66531/
+	
+	__shared_state = dict()
+	
+	def __init__(self, **k):
+		self.__dict__ = self.__shared_state
+		super().__init__(dict(), **k)
+		self.startedc = ctime()
+		self.started = time()
+		self.nets = []
+		self.buffs = []
+		#initialize this with a watcher on ~/ncbi/public/sra fastq-dump cache dir
+		self.cach = [type('SraCache', (object,), dict(path=j(expanduser('~'), 'ncbi/public/sra/'), size=property(lambda s: sum(getsize(j(s.path, f)) for f in listdir(s.path) if isfile(j(s.path, f))))))(), ]
+		
+	class Service(object):
+		def __init__(self, collection):
+			self.collection = collection
+			
+		def __enter__(self):
+			self.open()
+			self.collection.append(self)
+			
+		def __exit__(self):
+			try:
+				while(1):
+					self.collection.remove(self)
+			except ValueError:
+				pass
+			self.close()
+		
+	def __open__(self, flags):
+		self.data = dict(scheme=self.scheme,
+						 status=self.status,
+						 network=self.network,
+						 buffers=self.buffers,
+						 caches=self.caches,
+						 up_since=self.startedc,
+						 up_for=time()-self.started)
+		return super().__open__(flags)
+		
+	@property
+	def scheme(self):
+		return dict(status=dict(possible_statuses=dict(OK="system is ok",
+													   ERR="error condition",
+													   WARN="warning condition")),
+					network=dict(items=["list of network-attached processes and a rough estimate of their bandwidth use",
+							 	  dict(pid="process id",
+							 	  bandwidth="in b/s",
+							 	  bandwidth_hr="in human-readable format",
+							 	  fraction_of_total="decimal fraction of total download bandwidth this process is using")],
+							 	  total="in b/s"),
+					buffers=dict(items=["list of in-memory buffers and their utilization",
+							 			dict(pid="process id",
+							 	 		buffer_allocation="in b",
+							 	  		buffer_utilization="as decimal fraction of allocation")],
+							 	  total="total allocation of all buffers, in b"),
+				    caches=dict(items=["list of on-disk caches and their utilization",
+				    				   dict(path="path on disk",
+				    				        size="in b",
+				    				        fraction_of_total='decimal fraction of total disk footprint')],
+				    			total="in b"),
+					up_since="ctime string of filesystem creation",
+					up_for="uptime of filesystem in fractional seconds")
+		
+	@property
+	def status(self):
+		return ["OK", "system is ok"]
+		
+	@property
+	def network(self):
+		total = 0.0
+		def net(item):
+			return dict(fraction_of_total = item.rate / float(total))
+		return dict(items=[net(i) for i in self.nets], total=total)
+		
+	@property
+	def buffers(self):
+		total = 0
+		def buf(item):
+			return dict()
+		return dict(items=[buf(i) for i in self.buffs], total=total)
+		
+	@property
+	def caches(self):
+		total = sum([i.size for i in self.cach])
+		def cache(item):
+			return dict(path=item.path,
+						size=item.size,
+						fraction_of_total=item.size / float(total))
+		return dict(items=[cache(i) for i in self.cach], total=total)
+		
+	#the decorators
+		
+	@classmethod
+	def track_buffer(cls, buffer_factory):
+		"class decorator for tracking buffer use, single arg is a stream class"
+		def decorate(func):
+			def wrapper(*a, **k):
+				k['buffer'] = buffer_factory
+				return func(*a, **k)
+			return wrapper
+		return decorate
+		
+	@classmethod
+	def track_as_network(cls, func):
+		def wrapper(*a, **k):
+			return func(*a, **k)
+		return wrapper
+		
+	@classmethod
+	def track_disk(cls, func):
+		tempfile = None #do something here
+		def wrapper(*a, **k):
+			k['tempfile']
+		
+						 
 		
 class Passthrough(Node):
 	
@@ -307,8 +459,8 @@ class Passthrough(Node):
 class Stream(Dir):
 	"streams"
 	
-	st_mode = (0o100000 #file
-			 | 0o755 )
+	st_mode = (FILE #file
+			 | RWXR_XR_X )
 			 
 	def __read__(self, length, offset, fh):
 		"stream - offset reads not permitted"
@@ -321,7 +473,7 @@ class UriStream(Stream):
 		self.s = s
 	
 	def __open__(self, flags):
-		self.stream = requests.get(self.stream).raw
+		self.stream = requests.get(self.s).raw
 		return 0
 		
 	def __close__(self, fh):
@@ -348,6 +500,28 @@ class ProcessStream(Stream, Passthrough):
 		self.stream.close()
 		unlink(self.fp)
 		return 0
+		
+class BufferedProcessStream(ProcessStream):
+
+	buffer_size = 10000000
+	
+	@ReflectiveMonitorStream.track_buffer(BytesIO)
+	def __init__(self, buffer=BytesIO, **k):
+		super().__init__(**k)
+		self.buffer = buffer(buffer_size)
+		
+	def __open__(self, flags=None):
+		pass
+		
+	def __close__(self, fh=None):
+		pass
+		
+	def __reset__(self):
+		self.__close__()
+		self.__open__()
+		
+	def __read__(self, length, offset, fh):	
+		pass
 	
 		
 		
@@ -360,6 +534,11 @@ types = {
 		 'process':ProcessStream
 		 }
 		 
+def main(fs):
+	
+	fs.childs['system.json'] = ReflectiveMonitorStream(n='system.json')
+	FUSE(fs, environ.get('MOUNT', '/data'), nothreads=True, foreground=True)
+		 
 if __name__ == '__main__':
 	 # create the default logger used by the logging mixin
 	logger = logging.getLogger('fuse.log-mixin')
@@ -371,14 +550,5 @@ if __name__ == '__main__':
 	logger.addHandler(ch)
 # 	print('\n'.join(get(example).__traverse__()))
 	with open(sys.argv[1], 'r') as struct:
-		fs = get(json.load(struct))
-# 		print('\n'.join(fs.__traverse__()))
-# 		print(fs)
-# 		print(fs.__resolve__('/'))
-#		print(fs.__resolve__('/child_process.fastq'))
-# 		print(fs.__resolve__('/child_dir/'))
-# 		print(fs.__resolve__('/child_dir/child_file.txt'))
-# 		print(fs.__resolve__('/doesnt_exist'))
-#		print(fs.getattr('/child_dir'))
-#		print(list(fs.readdir('/', None)))
-		FUSE(fs, environ.get('MOUNT', '/data'), nothreads=True, foreground=True)
+		main(get(json.load(struct)))
+		
